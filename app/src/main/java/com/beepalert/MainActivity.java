@@ -11,14 +11,17 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** Draggable vertical fader (level 0-10). Higher level = louder beep. */
+/**
+ * Draggable vertical fader (level 0-10).
+ * Higher level = louder, faster and higher-pitched beep.
+ * Level 10 = rapid two-tone alert. Sound starts automatically at level 0.
+ */
 public class MainActivity extends Activity {
 
     private static final int MAX_LEVEL = 10;
     private static final int SAMPLE_RATE = 44100;
-    private static final double TONE_HZ = 880.0;
 
-    private volatile int level = 5;
+    private volatile int level = 0;
     private volatile boolean playing = false;
     private Thread audioThread;
 
@@ -55,7 +58,6 @@ public class MainActivity extends Activity {
         root.addView(fader, lp);
 
         toggle = new Button(this);
-        toggle.setText("Start");
         toggle.setOnClickListener(v -> {
             if (playing) stopSound(); else startSound();
         });
@@ -66,10 +68,12 @@ public class MainActivity extends Activity {
     }
 
     private void updateLabel() {
-        levelText.setText("Level " + level);
+        levelText.setText(level == MAX_LEVEL ? "ALERT!" : "Level " + level);
+        levelText.setTextColor(level == MAX_LEVEL ? Color.RED : Color.BLACK);
     }
 
     private void startSound() {
+        if (playing) return;
         playing = true;
         toggle.setText("Stop");
         audioThread = new Thread(this::beepLoop);
@@ -85,34 +89,74 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Repeating beep: 200 ms tone, 300 ms silence. Amplitude follows the level. */
+    /**
+     * Beep cycle per level (level 0 = silent):
+     *   level 1: one beep every 1.0 s ... level 9: about 4 beeps per second.
+     *   level 10: continuous fast two-tone alert.
+     */
     private void beepLoop() {
         int minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
         AudioTrack track = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                Math.max(minBuf, 4096), AudioTrack.MODE_STREAM);
+                Math.max(minBuf, 2048), AudioTrack.MODE_STREAM);
         track.play();
 
-        int toneSamples = SAMPLE_RATE / 5;      // 200 ms
-        int cycleSamples = SAMPLE_RATE / 2;     // 500 ms
-        short[] buf = new short[1024];
-        long n = 0;
+        short[] buf = new short[512];
+        double phase = 0;
+        int posInCycle = 0;
+        int cycleLen = 1;
+        int toneLen = 0;
+        int cycleCount = 0;
 
         while (playing) {
-            // Squared curve so each level step sounds like a clear increase.
-            double v = (double) level / MAX_LEVEL;
-            double amp = v * v * Short.MAX_VALUE;
-            for (int i = 0; i < buf.length; i++, n++) {
-                int pos = (int) (n % cycleSamples);
-                buf[i] = pos < toneSamples
-                        ? (short) (amp * Math.sin(2 * Math.PI * TONE_HZ * n / SAMPLE_RATE))
-                        : 0;
+            for (int i = 0; i < buf.length; i++) {
+                if (posInCycle >= cycleLen) {
+                    // Start a new beep cycle using the current level.
+                    posInCycle = 0;
+                    cycleCount++;
+                    int lv = level;
+                    if (lv == 0) {
+                        cycleLen = SAMPLE_RATE / 20;   // silent, re-check level every 50 ms
+                        toneLen = 0;
+                    } else if (lv == MAX_LEVEL) {
+                        cycleLen = SAMPLE_RATE * 125 / 1000;  // 125 ms, no gap
+                        toneLen = cycleLen;
+                    } else {
+                        // 1000 ms at level 1 down to 240 ms at level 9
+                        int ms = 1000 - (lv - 1) * 95;
+                        cycleLen = SAMPLE_RATE * ms / 1000;
+                        toneLen = cycleLen / 2;
+                    }
+                }
+
+                int lv = level;
+                double sample = 0;
+                if (posInCycle < toneLen && lv > 0) {
+                    double freq;
+                    if (lv == MAX_LEVEL) {
+                        freq = (cycleCount % 2 == 0) ? 1800 : 1200;  // two-tone alert
+                    } else {
+                        freq = 700 + lv * 70;   // 770 Hz .. 1330 Hz
+                    }
+                    phase += 2 * Math.PI * freq / SAMPLE_RATE;
+                    if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+                    double v = (double) lv / MAX_LEVEL;
+                    sample = v * v * Short.MAX_VALUE * Math.sin(phase);
+                }
+                buf[i] = (short) sample;
+                posInCycle++;
             }
             track.write(buf, 0, buf.length);
         }
         track.stop();
         track.release();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        startSound();
     }
 
     @Override
